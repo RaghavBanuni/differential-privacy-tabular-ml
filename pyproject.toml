@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "differential-privacy-tabular-ml"
+version = "1.0.0"
+description = "Differential privacy for tabular ML from scratch: Laplace and Gaussian mechanisms, RDP accounting for the subsampled Gaussian, DP-SGD with per-example clipping, and a membership-inference audit"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Raghav Banuni" }]
+keywords = ["differential-privacy", "dp-sgd", "renyi-dp", "membership-inference", "privacy-accounting"]
+classifiers = [
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3.10",
+  "Topic :: Security",
+]
+# Nothing at runtime. Opacus and dp-accounting are the right production choices; the accounting arithmetic
+# and the clipping details are what this repository is about, and a library call hides both.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4"]
+
+[project.scripts]
+dptab-demo = "dptab.cli:main"
+
+[tool.setuptools]
+packages = ["dptab"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["error"]
