@@ -3,16 +3,16 @@
 The load-bearing tests:
 
 * ``test_subsampled_bound_reduces_to_the_gaussian_bound_at_full_sampling`` -- the one internal consistency
-  check available on the Mironov formula. It caught a real bug in this repository.
-* ``test_rdp_is_tighter_than_advanced_which_is_tighter_than_basic`` -- if the ordering ever inverts, the
-  accountant is wrong, and a wrong accountant reports a comfortable epsilon for a run that has none.
+  check available on Mironov's formula. It caught a real bug in this repository.
+* ``test_rdp_is_tighter_than_advanced_which_is_tighter_than_basic`` -- if the ordering inverts, the accountant
+  reports a comfortable epsilon for a run that has none.
 * ``test_the_empirical_bound_never_exceeds_the_accounted_epsilon`` -- the falsification test. It cannot verify
   the guarantee; a failure would prove the implementation broken.
-* ``test_noise_calibration_hits_its_target`` -- the calibration is a bisection, so it must be checked against
-  the accountant it is inverting.
+* ``test_noise_calibration_hits_its_target`` -- the calibration is a bisection, so it is checked against the
+  accountant it inverts.
 
-Mechanism randomness is checked statistically with fixed seeds and generous tolerances, since a test that fails
-one run in twenty is worse than no test.
+Mechanism randomness is checked statistically with fixed seeds and generous tolerances: a test that fails one
+run in twenty is worse than no test.
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from dptab.audit import (  # noqa: E402
+    AttackResult,
     audit_bound_is_consistent,
     canary_exposure,
     group_impact,
@@ -60,7 +61,7 @@ from dptab.mechanisms import (  # noqa: E402
 
 class TestLaplace:
     def test_the_noise_has_the_right_scale(self):
-        """Var[Lap(b)] = 2 b^2, so the standard deviation is b sqrt(2)."""
+        """Var[Lap(b)] = 2 b^2, so the standard deviation is b * sqrt(2)."""
         rng = random.Random(0)
         draws = [laplace_noise(2.0, rng) for _ in range(40_000)]
         assert statistics.mean(draws) == pytest.approx(0.0, abs=0.05)
@@ -86,12 +87,12 @@ class TestLaplace:
 
 
 class TestGaussianAndLocal:
-    def test_sigma_matches_the_closed form_calibration(self):
+    def test_sigma_matches_the_closed_form_calibration(self):
         expected = math.sqrt(2.0 * math.log(1.25 / 1e-5)) / 0.5
         assert gaussian_sigma(1.0, 0.5, 1e-5) == pytest.approx(expected)
 
     def test_the_classical_bound_refuses_epsilon_above_one(self):
-        """Not loose above eps = 1 -- wrong. Returning a number there would be the dangerous choice."""
+        """Above eps = 1 the classical bound is wrong, not merely loose. Returning a number would be worse."""
         with pytest.raises(ValueError, match="requires eps < 1"):
             gaussian_sigma(1.0, 1.5, 1e-5)
 
@@ -102,26 +103,19 @@ class TestGaussianAndLocal:
         rng = random.Random(3)
         truth = 0.3
         answers = [randomised_response(rng.random() < truth, 1.0, rng) for _ in range(200_000)]
-        estimate = debias_randomised_response(sum(answers) / len(answers), 1.0)
-        assert estimate == pytest.approx(truth, abs=0.02)
+        assert debias_randomised_response(sum(answers) / len(answers), 1.0) == pytest.approx(
+            truth, abs=0.02
+        )
 
     def test_local_dp_needs_far_more_samples_than_central(self):
-        """The comparison that justifies the central model where a curator can be trusted."""
+        """The comparison that justifies the central model wherever a curator can be trusted."""
         rng = random.Random(4)
         truth = 0.3
-        local = [
-            abs(
-                debias_randomised_response(
-                    sum(randomised_response(rng.random() < truth, 1.0, rng) for _ in range(2000)) / 2000,
-                    1.0,
-                )
-                - truth
-            )
-            for _ in range(20)
-        ]
-        central = [
-            abs(laplace_mechanism(truth, 1.0 / 2000, 1.0, rng) - truth) for _ in range(20)
-        ]
+        local = []
+        for _ in range(20):
+            answers = [randomised_response(rng.random() < truth, 1.0, rng) for _ in range(2000)]
+            local.append(abs(debias_randomised_response(sum(answers) / 2000, 1.0) - truth))
+        central = [abs(laplace_mechanism(truth, 1.0 / 2000, 1.0, rng) - truth) for _ in range(20)]
         assert statistics.mean(local) > 20 * statistics.mean(central)
 
 
@@ -133,7 +127,7 @@ class TestClippedMeanAndHistogram:
         assert statistics.mean(estimates) == pytest.approx(50.0, abs=0.5)
 
     def test_a_tight_clip_biases_a_heavy_tail(self):
-        """The bias the noise cannot fix, and the reason a private mean needs its clip range justified."""
+        """The bias no epsilon can fix, and why a private mean needs its clip range justified."""
         rng = random.Random(6)
         values = [rng.lognormvariate(3.0, 1.2) for _ in range(4000)]
         truth = statistics.mean(values)
@@ -151,8 +145,7 @@ class TestClippedMeanAndHistogram:
         labels = ["a"] * 100 + ["b"] * 10
         totals = {"a": 0.0, "b": 0.0, "c": 0.0}
         for _ in range(400):
-            noisy = private_histogram(labels, ("a", "b", "c"), 1.0, rng)
-            for key, value in noisy.items():
+            for key, value in private_histogram(labels, ("a", "b", "c"), 1.0, rng).items():
                 totals[key] += value
         assert totals["a"] / 400 == pytest.approx(100.0, abs=1.0)
         assert totals["b"] / 400 == pytest.approx(10.0, abs=1.0)
@@ -164,7 +157,7 @@ class TestAccounting:
         assert gaussian_rdp(4.0, 2.0) == pytest.approx(4.0 / (2.0 * 4.0))
 
     def test_subsampled_bound_reduces_to_the_gaussian_bound_at_full_sampling(self):
-        """The internal consistency check on Mironov's formula. It caught a real bug here."""
+        """Mironov's sum collapses to its j = alpha term at q = 1. This check caught a real bug."""
         for alpha in (2, 3, 8, 16):
             assert subsampled_gaussian_rdp(alpha, 1.5, 1.0) == pytest.approx(
                 gaussian_rdp(alpha, 1.5), rel=1e-9
@@ -181,7 +174,7 @@ class TestAccounting:
             subsampled_gaussian_rdp(2.5, 1.0, 0.01)  # type: ignore[arg-type]
 
     def test_rdp_composes_by_addition(self):
-        """The property that makes RDP the right currency: k steps cost exactly k times one step."""
+        """Exact additivity is the entire reason RDP is the currency DP-SGD accounting uses."""
         one = RDPAccountant()
         one.step(1.1, 0.01, 1)
         many = RDPAccountant()
@@ -190,21 +183,18 @@ class TestAccounting:
             assert many.spent[order] == pytest.approx(500 * one.spent[order], rel=1e-12)
 
     def test_rdp_is_tighter_than_advanced_which_is_tighter_than_basic(self):
-        """If this ordering inverts, the accountant is reporting a comfortable epsilon for nothing."""
         steps, epsilon_step = 1000, 0.05
         basic = basic_composition([epsilon_step] * steps, [0.0] * steps)[0]
         advanced = advanced_composition(epsilon_step, 0.0, steps, 1e-6)[0]
         accountant = RDPAccountant()
         accountant.step(1.1, 0.01, steps)
-        rdp = accountant.epsilon(1e-5)[0]
-        assert rdp < advanced < basic
+        assert accountant.epsilon(1e-5)[0] < advanced < basic
 
     def test_epsilon_grows_sublinearly_in_steps(self):
         first = RDPAccountant()
         first.step(1.1, 0.01, 1000)
         second = RDPAccountant()
         second.step(1.1, 0.01, 4000)
-        # four times the steps costs less than four times the epsilon
         assert second.epsilon(1e-5)[0] < 4.0 * first.epsilon(1e-5)[0]
 
     def test_a_smaller_delta_costs_more_epsilon(self):
@@ -223,9 +213,9 @@ class TestAccounting:
             assert accountant.epsilon(1e-5)[0] == pytest.approx(target, rel=0.02)
 
     def test_calibration_is_monotone_in_the_target(self):
-        loose = noise_for_target_epsilon(8.0, 1e-5, 500, 0.05)
-        tight = noise_for_target_epsilon(0.5, 1e-5, 500, 0.05)
-        assert tight > loose
+        assert noise_for_target_epsilon(0.5, 1e-5, 500, 0.05) > noise_for_target_epsilon(
+            8.0, 1e-5, 500, 0.05
+        )
 
     def test_an_unreachable_target_raises(self):
         with pytest.raises(ValueError, match="cannot reach"):
@@ -252,21 +242,18 @@ class TestClipping:
 
 class TestLearning:
     def test_the_non_private_model_learns(self):
-        dataset = make_dataset(n=2000, canaries=0, seed=0)
-        train, holdout = dataset.split(0.7, seed=0)
+        train, holdout = make_dataset(n=2000, canaries=0, seed=0).split(0.7, seed=0)
         result = train_sgd(train, epochs=15, seed=0)
         assert result.model.accuracy(holdout) > 0.7
-        assert result.epsilon is None  # no guarantee, and it says so
+        assert result.epsilon is None  # no guarantee, and the type says so
 
     def test_the_loss_curve_decreases(self):
-        dataset = make_dataset(n=1500, canaries=0, seed=1)
-        result = train_sgd(dataset, epochs=12, seed=1)
+        result = train_sgd(make_dataset(n=1500, canaries=0, seed=1), epochs=12, seed=1)
         assert result.loss_curve[-1] < result.loss_curve[0]
 
     def test_the_per_example_gradient_matches_a_finite_difference(self):
         """The gradient is written by hand, so it is checked numerically rather than trusted."""
-        dataset = make_dataset(n=10, canaries=0, seed=2)
-        record = dataset.records[0]
+        record = make_dataset(n=10, canaries=0, seed=2).records[0]
         model = LogisticModel([0.3, -0.2, 0.1, 0.4, -0.5], 0.2)
         analytic = model.gradient(record)
         step = 1e-6
@@ -277,24 +264,21 @@ class TestLearning:
             assert analytic[index] == pytest.approx(numeric, abs=1e-4)
 
     def test_dpsgd_reports_an_epsilon_and_learns_something(self):
-        dataset = make_dataset(n=3000, canaries=0, seed=3)
-        train, holdout = dataset.split(0.7, seed=3)
+        train, holdout = make_dataset(n=3000, canaries=0, seed=3).split(0.7, seed=3)
         result = train_dpsgd(train, target_epsilon=8.0, epochs=15, seed=3)
         assert result.epsilon == pytest.approx(8.0, rel=0.05)
         assert result.model.accuracy(holdout) > 0.6
         assert 0.0 <= result.clip_rate <= 1.0
 
     def test_a_tighter_budget_costs_accuracy(self):
-        dataset = make_dataset(n=3000, canaries=0, seed=4)
-        train, holdout = dataset.split(0.7, seed=4)
+        train, holdout = make_dataset(n=3000, canaries=0, seed=4).split(0.7, seed=4)
         loose = train_dpsgd(train, target_epsilon=8.0, epochs=15, seed=4)
         tight = train_dpsgd(train, target_epsilon=0.3, epochs=15, seed=4)
         assert loose.model.accuracy(holdout) >= tight.model.accuracy(holdout)
 
-    def test_the_private_model_is_worse_than_the_baseline(self):
-        """The price of the guarantee. A DP model that matched the baseline would mean a bug in the accounting."""
-        dataset = make_dataset(n=3000, canaries=0, seed=5)
-        train, holdout = dataset.split(0.7, seed=5)
+    def test_the_private_model_is_no_better_than_the_baseline(self):
+        """The price of the guarantee. A DP model matching the baseline would mean an accounting bug."""
+        train, holdout = make_dataset(n=3000, canaries=0, seed=5).split(0.7, seed=5)
         baseline = train_sgd(train, epochs=15, seed=5)
         private = train_dpsgd(train, target_epsilon=1.0, epochs=15, seed=5)
         assert private.model.accuracy(holdout) <= baseline.model.accuracy(holdout) + 1e-9
@@ -306,19 +290,16 @@ class TestLearning:
 
 
 class TestAudit:
-    def test_a_memorising_model_is_attackable_and_a_private_one_much_less_so(self):
-        dataset = make_dataset(n=2500, canaries=40, seed=7)
-        train, holdout = dataset.split(0.7, seed=7)
+    def test_a_memorising_model_is_at_least_as_attackable_as_a_private_one(self):
+        train, holdout = make_dataset(n=2500, canaries=40, seed=7).split(0.7, seed=7)
         baseline = train_sgd(train, epochs=40, learning_rate=0.6, seed=7)
         private = train_dpsgd(train, target_epsilon=1.0, epochs=20, seed=7)
-
         loud = membership_inference(baseline.model, train, holdout)
         quiet = membership_inference(private.model, train, holdout)
         assert loud.advantage >= quiet.advantage
 
     def test_dp_reduces_canary_exposure(self):
-        dataset = make_dataset(n=2000, canaries=40, seed=8)
-        train, holdout = dataset.split(0.7, seed=8)
+        train, holdout = make_dataset(n=2000, canaries=40, seed=8).split(0.7, seed=8)
         baseline = train_sgd(train, epochs=40, learning_rate=0.6, seed=8)
         private = train_dpsgd(train, target_epsilon=1.0, epochs=20, seed=8)
         assert canary_exposure(private.model, train, holdout) <= canary_exposure(
@@ -326,9 +307,8 @@ class TestAudit:
         )
 
     def test_the_empirical_bound_never_exceeds_the_accounted_epsilon(self):
-        """The falsification test: it cannot prove privacy, but a failure would prove a broken run."""
-        dataset = make_dataset(n=2500, canaries=20, seed=9)
-        train, holdout = dataset.split(0.7, seed=9)
+        """Cannot prove privacy; a failure would prove a broken run."""
+        train, holdout = make_dataset(n=2500, canaries=20, seed=9).split(0.7, seed=9)
         for target in (0.5, 2.0, 8.0):
             result = train_dpsgd(train, target_epsilon=target, epochs=15, seed=9)
             attack = membership_inference(result.model, train, holdout)
@@ -339,13 +319,12 @@ class TestAudit:
             )
 
     def test_a_chance_level_attack_implies_no_lower_bound(self):
-        from dptab.audit import AttackResult
-
         assert AttackResult(0.5, 0.0, 0.0, 0.5, 0.5).empirical_epsilon == pytest.approx(0.0)
 
     def test_group_impact_reports_a_per_group_cost(self):
-        dataset = make_dataset(n=3000, minority_share=0.08, canaries=0, seed=10)
-        train, holdout = dataset.split(0.7, seed=10)
+        train, holdout = make_dataset(n=3000, minority_share=0.08, canaries=0, seed=10).split(
+            0.7, seed=10
+        )
         baseline = train_sgd(train, epochs=15, seed=10)
         private = train_dpsgd(train, target_epsilon=1.0, epochs=15, seed=10)
         impact = group_impact(baseline.model, private.model, holdout)
@@ -353,8 +332,7 @@ class TestAudit:
         assert impact.disparity() >= 0.0
 
     def test_the_dataset_reports_its_own_composition(self):
-        dataset = make_dataset(n=1000, minority_share=0.1, canaries=5, seed=11)
-        counts = dataset.group_counts()
+        counts = make_dataset(n=1000, minority_share=0.1, canaries=5, seed=11).group_counts()
         assert counts["canary"] == 5
         assert counts["minority"] == 100
         assert sum(counts.values()) == 1005
