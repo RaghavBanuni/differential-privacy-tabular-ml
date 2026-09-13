@@ -28,7 +28,7 @@ reportable or absurd.
 **Amplification by subsampling.** A Gaussian mechanism applied to a random ``q``-fraction of the data is much
 more private than the same mechanism on all of it: a record not sampled leaks nothing. The RDP bound for the
 subsampled Gaussian is what makes DP-SGD possible at all, and the bound implemented here is Mironov's
-closed-form expression for the Poisson-subsampled Gaussian, which is valid for integer orders.
+closed-form expression for the Poisson-subsampled Gaussian, valid at integer orders.
 """
 
 from __future__ import annotations
@@ -44,10 +44,7 @@ from dataclasses import dataclass, field
 
 
 def laplace_noise(scale: float, rng: random.Random) -> float:
-    """Laplace(0, scale) by inverse transform on a uniform draw.
-
-    ``-scale * sign(u) * log(1 - 2|u|)`` with ``u`` uniform on (-0.5, 0.5).
-    """
+    """Laplace(0, scale) by inverse transform: ``-scale * sign(u) * log(1 - 2|u|)``, u uniform on (-0.5, 0.5)."""
     if scale <= 0:
         raise ValueError("scale must be positive")
     uniform = rng.random() - 0.5
@@ -61,7 +58,7 @@ def laplace_mechanism(
 
     No delta, so no failure probability -- the guarantee holds absolutely rather than with high probability.
     That is worth something in a regulated setting, and it costs more noise per unit of epsilon than Gaussian
-    for multi-dimensional queries.
+    does for multi-dimensional queries.
     """
     if sensitivity <= 0:
         raise ValueError("sensitivity must be positive; a query with zero sensitivity needs no noise")
@@ -71,9 +68,9 @@ def laplace_mechanism(
 
 
 def gaussian_sigma(sensitivity: float, epsilon: float, delta: float) -> float:
-    """The classical Gaussian mechanism calibration: ``sigma >= Delta_2 * sqrt(2 ln(1.25/delta)) / eps``.
+    """Classical Gaussian calibration: ``sigma >= Delta_2 * sqrt(2 ln(1.25/delta)) / eps``.
 
-    Valid only for ``eps < 1``; above that the classical bound is not merely loose, it is **wrong**, and this
+    Valid only for ``eps < 1``; above that the classical bound is not merely loose, it is **wrong**, so this
     raises rather than returning a number that looks fine. The analytic Gaussian mechanism (Balle & Wang, 2018)
     removes the restriction and is the right implementation for production use.
     """
@@ -97,10 +94,10 @@ def gaussian_mechanism(
 def randomised_response(truth: bool, epsilon: float, rng: random.Random) -> bool:
     """Local DP for a yes/no question: answer truthfully with probability ``e^eps / (1 + e^eps)``.
 
-    The local model needs no trusted curator, and pays for it: to estimate a proportion to within one
-    percentage point at ``eps = 1`` takes on the order of a hundred thousand respondents. Apple and Google
-    deploy local DP because they cannot promise to be trustworthy; a hospital analysing its own records can use
-    the central model and get far more utility for the same epsilon.
+    The local model needs no trusted curator and pays for it: estimating a proportion to within a percentage
+    point at ``eps = 1`` takes on the order of a hundred thousand respondents. Apple and Google deploy local DP
+    because they cannot promise to be trustworthy; a hospital analysing its own records can use the central
+    model and get far more utility for the same epsilon.
     """
     if epsilon <= 0:
         raise ValueError("epsilon must be positive")
@@ -109,11 +106,11 @@ def randomised_response(truth: bool, epsilon: float, rng: random.Random) -> bool
 
 
 def debias_randomised_response(positive_share: float, epsilon: float) -> float:
-    """Invert randomised response: recover the underlying proportion from the noisy one.
+    """Invert randomised response to recover the underlying proportion.
 
-    The estimate is unbiased and can fall outside [0, 1] on small samples, which is not a bug -- clamping it
-    would introduce bias, and a proportion of -0.03 is honest evidence that the sample is too small for the
-    epsilon chosen.
+    The estimate is unbiased and can fall outside [0, 1] on small samples. That is not a bug: clamping would
+    introduce bias, and a proportion of -0.03 is honest evidence that the sample is too small for the chosen
+    epsilon.
     """
     truthful = math.exp(epsilon) / (1.0 + math.exp(epsilon))
     return (positive_share - (1.0 - truthful)) / (2.0 * truthful - 1.0)
@@ -124,11 +121,11 @@ def clipped_mean(
 ) -> float:
     """A private mean, done properly: clip to a public range, then add noise scaled to that range.
 
-    The sensitivity of a mean over ``n`` records with values in ``[lower, upper]`` is ``(upper - lower) / n``,
-    which is finite **only because of the clipping**. Two consequences that are usually skipped:
+    The sensitivity of a mean over ``n`` records with values in ``[lower, upper]`` is ``(upper - lower) / n`` --
+    finite **only because of the clipping**. Two consequences usually skipped:
 
-    * the clipping range must be chosen from public knowledge or paid for with privacy budget -- picking it by
-      looking at the data's min and max leaks the extremes, which are exactly the records most identifiable;
+    * the clipping range must come from public knowledge or be paid for with privacy budget; choosing it by
+      looking at the data's min and max leaks the extremes, which are exactly the most identifiable records;
     * clipping introduces bias, and on a heavy-tailed variable that bias can exceed the noise. A private mean
       income computed with a clipping bound of 100k is not an estimate of mean income.
     """
@@ -139,6 +136,30 @@ def clipped_mean(
     clipped = [min(max(value, lower), upper) for value in values]
     sensitivity = (upper - lower) / len(values)
     return laplace_mechanism(sum(clipped) / len(clipped), sensitivity, epsilon, rng)
+
+
+def private_histogram(
+    labels: "list[str]", categories: "tuple[str, ...]", epsilon: float, rng: random.Random
+) -> "dict[str, float]":
+    """A histogram over a **public** category list: sensitivity 1, one Laplace draw per bucket.
+
+    The category list must be public. Deriving the buckets from the data means the *presence of a bucket* leaks
+    a record -- the classic failure where a histogram of diagnoses reveals that someone in the dataset has a
+    rare disease, no matter how much noise the count carries.
+
+    Counts may go negative after noise. Reporting them as-is keeps the estimate unbiased; clamping to zero is
+    valid post-processing but biases every small bucket upwards, which matters precisely where the data is
+    sparse.
+    """
+    if epsilon <= 0:
+        raise ValueError("epsilon must be positive")
+    counts = dict.fromkeys(categories, 0)
+    for label in labels:
+        if label in counts:
+            counts[label] += 1
+    return {
+        category: count + laplace_noise(1.0 / epsilon, rng) for category, count in counts.items()
+    }
 
 
 # ---------------------------------------------------------------------------------------------
@@ -154,13 +175,13 @@ def basic_composition(epsilons: "list[float]", deltas: "list[float]") -> "tuple[
 def advanced_composition(
     epsilon: float, delta: float, k: int, target_delta: float
 ) -> "tuple[float, float]":
-    """``k``-fold composition of an ``(eps, delta)`` mechanism, Dwork-Rothblum-Vadhan.
+    """``k``-fold composition (Dwork-Rothblum-Vadhan):
 
         eps_total = sqrt(2 k ln(1/delta')) * eps + k * eps * (e^eps - 1)
 
     Roughly ``sqrt(k)`` rather than ``k`` for small epsilon, which is the difference between a thousand-step
-    training run being reportable and being nonsense. Note it *adds* a ``delta'`` -- privacy that holds with
-    high probability rather than absolutely.
+    training run being reportable and being nonsense. It *adds* a ``delta'``: privacy that holds with high
+    probability rather than absolutely.
     """
     if k < 1:
         raise ValueError("k must be at least 1")
@@ -180,10 +201,10 @@ DEFAULT_ORDERS = (2, 3, 4, 5, 6, 8, 12, 16, 24, 32, 48, 64)
 
 
 def gaussian_rdp(alpha: float, noise_multiplier: float) -> float:
-    """RDP of the Gaussian mechanism: ``alpha / (2 sigma^2)`` at order ``alpha``.
+    """RDP of the Gaussian mechanism: ``alpha / (2 sigma^2)``.
 
-    Linear in ``alpha`` and inversely quadratic in ``sigma``. The elegance is that composition is now addition:
-    ``k`` steps cost ``k * alpha / (2 sigma^2)`` at each order, with no approximation whatsoever.
+    Linear in ``alpha``, inversely quadratic in ``sigma``. The elegance is that composition becomes addition:
+    ``k`` steps cost ``k * alpha / (2 sigma^2)`` at each order, with no approximation at all.
     """
     if alpha <= 1:
         raise ValueError("RDP order must exceed 1")
@@ -193,7 +214,7 @@ def gaussian_rdp(alpha: float, noise_multiplier: float) -> float:
 
 
 def subsampled_gaussian_rdp(alpha: int, noise_multiplier: float, sample_rate: float) -> float:
-    """RDP of the Poisson-subsampled Gaussian at integer order ``alpha`` (Mironov et al., 2019).
+    """RDP of the Poisson-subsampled Gaussian at integer order ``alpha`` (Mironov et al., 2019):
 
         eps(alpha) = (1 / (alpha - 1)) * log( sum_{j=0}^{alpha} C(alpha, j) (1-q)^{alpha-j} q^j
                                               * exp( j (j-1) / (2 sigma^2) ) )
@@ -201,8 +222,10 @@ def subsampled_gaussian_rdp(alpha: int, noise_multiplier: float, sample_rate: fl
     This bound is why DP-SGD works: sampling a 1% minibatch makes each step roughly a hundred times cheaper in
     privacy terms, because a record that was not sampled cannot have influenced the update.
 
-    Restricted to integer orders, which is where the closed form is valid -- a fractional order needs numerical
-    integration, and silently rounding would misstate the guarantee.
+    Restricted to integer orders, where the closed form is valid. A fractional order needs numerical
+    integration, and silently rounding to an integer would misstate the guarantee. At ``q = 1`` the sum
+    collapses to the single ``j = alpha`` term and reproduces the plain Gaussian bound exactly, which the tests
+    check -- it is the natural consistency condition on this formula.
     """
     if alpha != int(alpha) or alpha < 2:
         raise ValueError("this closed form requires an integer order alpha >= 2")
@@ -212,34 +235,32 @@ def subsampled_gaussian_rdp(alpha: int, noise_multiplier: float, sample_rate: fl
         raise ValueError("noise multiplier must be positive")
 
     alpha = int(alpha)
+    if sample_rate == 1.0:
+        return gaussian_rdp(alpha, noise_multiplier)
+
     log_terms = []
     for j in range(alpha + 1):
-        log_binomial = (
-            math.lgamma(alpha + 1) - math.lgamma(j + 1) - math.lgamma(alpha - j + 1)
-        )
-        log_term = (
+        log_binomial = math.lgamma(alpha + 1) - math.lgamma(j + 1) - math.lgamma(alpha - j + 1)
+        log_terms.append(
             log_binomial
-            + (alpha - j) * math.log(1.0 - sample_rate)
-            + j * math.log(sample_rate)
+            + (alpha - j) * math.log1p(-sample_rate)
+            + (j * math.log(sample_rate) if j else 0.0)
             + (j * (j - 1)) / (2.0 * noise_multiplier**2)
-            if sample_rate < 1.0
-            else log_binomial + (j * (j - 1)) / (2.0 * noise_multiplier**2)
         )
-        log_terms.append(log_term)
 
-    # log-sum-exp: the terms span many orders of magnitude and naive summation overflows
+    # log-sum-exp: the exponent grows quadratically in j, so naive summation overflows for large alpha
     largest = max(log_terms)
     total = largest + math.log(sum(math.exp(term - largest) for term in log_terms))
     return total / (alpha - 1)
 
 
 def rdp_to_dp(rdp_epsilon: float, alpha: float, delta: float) -> float:
-    """Convert RDP to ``(eps, delta)``-DP: ``eps = rdp + log(1/delta) / (alpha - 1)``.
+    """``eps = rdp + log(1/delta) / (alpha - 1)``.
 
-    The conversion used here is the standard one; tighter variants exist (Canonne-Kamath-Steinke, Balle et al.)
-    and give a visibly smaller epsilon for the same run. Using the loose conversion is safe -- it over-states
-    the privacy loss -- but it is worth knowing that a headline epsilon depends on the accountant as much as on
-    the noise.
+    The standard conversion. Tighter variants exist (Canonne-Kamath-Steinke, Balle et al.) and give a visibly
+    smaller epsilon for the same run. Using the loose one is safe -- it over-states the loss -- but a headline
+    epsilon depends on the accountant as much as on the noise, which is worth saying out loud when comparing
+    numbers between papers.
     """
     if not 0.0 < delta < 1.0:
         raise ValueError("delta must lie in (0, 1)")
@@ -248,11 +269,11 @@ def rdp_to_dp(rdp_epsilon: float, alpha: float, delta: float) -> float:
 
 @dataclass
 class RDPAccountant:
-    """Accumulate RDP across steps at several orders, then convert once, taking the best order.
+    """Accumulate RDP across steps at several orders, convert once, and take the best order.
 
     Optimising over orders at the end is not a trick: RDP composes exactly at every order, so the tightest
-    ``(eps, delta)`` statement available is the minimum over them. Fixing a single order in advance throws
-    away a factor that can be substantial.
+    available ``(eps, delta)`` statement is the minimum over them. Fixing one order in advance throws away a
+    factor that can be substantial.
     """
 
     orders: "tuple[int, ...]" = DEFAULT_ORDERS
@@ -263,7 +284,6 @@ class RDPAccountant:
         self.spent = {order: 0.0 for order in self.orders}
 
     def step(self, noise_multiplier: float, sample_rate: float, count: int = 1) -> None:
-        """Account for ``count`` identical subsampled-Gaussian steps."""
         if count < 1:
             raise ValueError("count must be positive")
         for order in self.orders:
@@ -273,7 +293,6 @@ class RDPAccountant:
         self.steps += count
 
     def epsilon(self, delta: float) -> "tuple[float, int]":
-        """The tightest ``(eps, delta)`` available, and the order that produced it."""
         candidates = [
             (rdp_to_dp(value, order, delta), order) for order, value in self.spent.items()
         ]
@@ -281,10 +300,7 @@ class RDPAccountant:
 
     def report(self, delta: float) -> str:
         epsilon, order = self.epsilon(delta)
-        return (
-            f"{self.steps} steps -> (eps = {epsilon:.3f}, delta = {delta:g}) "
-            f"at RDP order {order}"
-        )
+        return f"{self.steps} steps -> (eps = {epsilon:.3f}, delta = {delta:g}) at RDP order {order}"
 
 
 def noise_for_target_epsilon(
@@ -295,12 +311,12 @@ def noise_for_target_epsilon(
     orders: "tuple[int, ...]" = DEFAULT_ORDERS,
     tolerance: float = 1e-4,
 ) -> float:
-    """Binary search the noise multiplier that hits a target epsilon -- the calibration people actually need.
+    """Bisect for the noise multiplier that hits a target epsilon -- the calibration people actually need.
 
-    Epsilon is monotonically decreasing in the noise multiplier, so bisection is exact up to tolerance. This is
-    the right direction to run the calculation: choose the privacy budget as a policy decision, then discover
-    what it costs in accuracy. Choosing the noise first and reporting whatever epsilon falls out is how
-    "eps = 8" ends up in a paper without anyone having decided that eps = 8 was acceptable.
+    Epsilon decreases monotonically in the noise multiplier, so bisection is exact to tolerance. This is the
+    right direction to run the calculation: fix the privacy budget as a policy decision, then discover what it
+    costs in accuracy. Choosing the noise first and reporting whatever epsilon falls out is how "eps = 8" ends
+    up in a paper without anyone having decided that eps = 8 was acceptable.
     """
     if target_epsilon <= 0:
         raise ValueError("target epsilon must be positive")
